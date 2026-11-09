@@ -14,6 +14,8 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -54,11 +56,15 @@ fun App() {
     val heard by AssistantState.heard.collectAsState()
     val action by AssistantState.action.collectAsState()
 
+    val screen by AssistantState.screen.collectAsState()
     var overlayOk by remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
+    var accOk by remember { mutableStateOf(ClickService.instance != null) }
+    val prefs = remember { ctx.getSharedPreferences("p", 0) }
+    var voice by remember { mutableStateOf(prefs.getBoolean("voice", false)) }
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
         val o = LifecycleEventObserver { _, e ->
-            if (e == Lifecycle.Event.ON_RESUME) overlayOk = Settings.canDrawOverlays(ctx)
+            if (e == Lifecycle.Event.ON_RESUME) { overlayOk = Settings.canDrawOverlays(ctx); accOk = ClickService.instance != null }
         }
         owner.lifecycle.addObserver(o); onDispose { owner.lifecycle.removeObserver(o) }
     }
@@ -83,7 +89,7 @@ fun App() {
     Column(
         Modifier.fillMaxSize()
             .background(Brush.verticalGradient(listOf(Color(0xFF0B1020), Color(0xFF151B34))))
-            .padding(24.dp).systemBarsPadding(),
+            .verticalScroll(rememberScrollState()).padding(24.dp).systemBarsPadding(),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text("Петя", fontSize = 34.sp, fontWeight = FontWeight.Bold, color = Color.White)
@@ -127,6 +133,16 @@ fun App() {
             modifier = Modifier.fillMaxWidth()
         ) { Text("Не усыплять в фоне (батарея)") }
 
+        OutlinedButton(
+            onClick = { ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text(if (accOk) "Спец. возможности: включены ✓" else "Включить спец. возможности (нажатие кнопок)") }
+
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Голосовые ответы (кроме сигналов)", color = Color.White, modifier = Modifier.weight(1f))
+            Switch(checked = voice, onCheckedChange = { voice = it; prefs.edit().putBoolean("voice", it).apply() })
+        }
+
         Spacer(Modifier.height(16.dp))
         Column(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Color(0x22FFFFFF)).padding(16.dp),
@@ -136,8 +152,15 @@ fun App() {
             listOf(
                 "Петя, ответь · сбрось", "Петя, позвони Любимой", "Петя, следующая песня · предыдущая",
                 "Петя, тише · громче · пауза", "Петя, включи музыку", "Петя, включи антирадар / навигатор",
-                "Петя, который час"
+                "Петя, напиши Любимой, что бегу домой (Телеграм)", "Петя, который час", "Петя, что на экране (список кнопок)"
             ).forEach { Text(it, color = Color(0xFFCBD5E1), fontSize = 13.sp) }
+        }
+        if (screen.isNotBlank()) {
+            Spacer(Modifier.height(12.dp))
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Color(0x22FFFFFF)).padding(16.dp)) {
+                Text("Что было на экране", color = Color.White, fontWeight = FontWeight.SemiBold)
+                Text(screen, color = Color(0xFFCBD5E1), fontSize = 12.sp)
+            }
         }
     }
 }

@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.ContactsContract.CommonDataKinds.Phone
 import android.telecom.TelecomManager
 import android.view.KeyEvent
@@ -14,26 +15,32 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Разбирает текст команды и выполняет действие. Возвращает фразу для озвучки. */
+data class Res(val say: String, val ok: Boolean = true)
+
+/** Разбирает текст команды и выполняет действие. */
 class CommandHandler(private val ctx: Context) {
     private val audio = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val telecom = ctx.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
     private val handler = Handler(Looper.getMainLooper())
 
-    // Музыкальное приложение по умолчанию (Яндекс.Музыка)
-    private val musicPackage = "ru.yandex.music"
+    private val musicPackage = ClickService.MUSIC
 
-    // Свои слова для приложений: «Петя, включи антирадар» -> ищем в названиях приложений
+    // «Петя, включи антирадар» -> ищем в названиях приложений любое из слов
     private val aliases = mapOf(
         "антирадар" to listOf("антирадар", "радар", "radar"),
         "навигатор" to listOf("навигатор", "navigator"),
         "карты" to listOf("карты", "maps"),
         "такси" to listOf("такси", "taxi"),
     )
+    // Для этих приложений после запуска нажимается «Старт», если ещё не запущено
+    private val startLabels = listOf("старт", "start", "запустить", "начать", "включить")
+    private val stopLabels = listOf("стоп", "stop", "остановить", "выключить")
 
-    fun handle(cmd: String): String {
+    fun handle(cmd: String): Res {
         fun has(vararg w: String) = w.any { cmd.contains(it) }
         return when {
+            cmd.startsWith("напиши") || cmd.startsWith("отправь") -> message(cmd)
+            has("на экране", "покажи кнопки") -> screen()
             has("ответь", "ответить", "возьми трубку", "подними трубку", "прими") -> answerCall()
             has("сбрось", "положи трубку", "отбой", "заверши звонок") -> endCall()
             has("позвони", "набери") -> call(cmd.substringAfter("позвони", cmd.substringAfter("набери", "")).trim())
@@ -45,30 +52,31 @@ class CommandHandler(private val ctx: Context) {
             has("громче", "погромче", "добавь") -> volume(AudioManager.ADJUST_RAISE, "Громче")
             has("включи музык", "музыку", "музыка") -> playMusic()
             has("время", "сколько времени", "который час") ->
-                "Сейчас " + SimpleDateFormat("H:mm", Locale("ru")).format(Date())
+                Res("Сейчас " + SimpleDateFormat("H:mm", Locale("ru")).format(Date()))
             has("включи", "открой", "запусти", "поехали") -> openApp(
                 cmd.replace(Regex("^.*?(включи|открой|запусти|поехали)\\s*"), "").trim()
             )
-            else -> "Не понял"
+            else -> Res("Не понял", false)
         }
     }
 
-    private fun answerCall(): String = try {
-        telecom.acceptRingingCall(); "Отвечаю"
-    } catch (e: SecurityException) { "Нет разрешения на звонки" }
+    // ---------- звонки ----------
+    private fun answerCall(): Res = try {
+        telecom.acceptRingingCall(); Res("Отвечаю")
+    } catch (e: SecurityException) { Res("Нет разрешения на звонки", false) }
 
     @Suppress("DEPRECATION")
-    private fun endCall(): String = try {
-        telecom.endCall(); "Сбросил"
-    } catch (e: SecurityException) { "Нет разрешения на звонки" }
+    private fun endCall(): Res = try {
+        telecom.endCall(); Res("Сбросил")
+    } catch (e: SecurityException) { Res("Нет разрешения на звонки", false) }
 
-    private fun call(spoken: String): String {
-        if (spoken.isBlank()) return "Кому звонить?"
-        val num = findNumber(spoken) ?: return "Не нашёл контакт $spoken"
+    private fun call(spoken: String): Res {
+        if (spoken.isBlank()) return Res("Кому звонить?", false)
+        val c = findContact(spoken) ?: return Res("Не нашёл контакт $spoken", false)
         return try {
-            telecom.placeCall(Uri.fromParts("tel", num.second, null), Bundle())
-            "Звоню: ${num.first}"
-        } catch (e: SecurityException) { "Нет разрешения на звонки" }
+            telecom.placeCall(Uri.fromParts("tel", c.second, null), Bundle())
+            Res("Звоню: ${c.first}")
+        } catch (e: SecurityException) { Res("Нет разрешения на звонки", false) }
     }
 
     /** Сопоставление с учётом падежей: «любимой» ~ «Любимая». */
@@ -77,7 +85,7 @@ class CommandHandler(private val ctx: Context) {
         return p >= 3 && p >= minOf(a.length, b.length) - 2
     }
 
-    private fun findNumber(spoken: String): Pair<String, String>? {
+    private fun findContact(spoken: String): Pair<String, String>? {
         val target = spoken.lowercase().replace('ё', 'е').trim()
         try {
             ctx.contentResolver.query(
@@ -94,28 +102,65 @@ class CommandHandler(private val ctx: Context) {
         return null
     }
 
+    // ---------- Телеграм ----------
+    private fun message(cmd: String): Res {
+        val rest = cmd.replace(Regex("^(напиши|отправь)\\s*(сообщение)?\\s*"), "")
+        val idx = rest.indexOf(" что ")
+        val name = if (idx > 0) rest.substring(0, idx) else rest.substringBefore(" ")
+        val msg = (if (idx > 0) rest.substring(idx + 5) else rest.substringAfter(" ", ""))
+            .trim().replaceFirstChar { it.uppercase() }
+        if (name.isBlank() || msg.isBlank()) return Res("Что написать?", false)
+        val c = findContact(name) ?: return Res("Не нашёл контакт $name", false)
+
+        var d = c.second.filter { it.isDigit() }
+        if (d.length == 11 && d.startsWith("8")) d = "7" + d.drop(1)
+        val uri = Uri.parse("tg://resolve?phone=$d&text=${Uri.encode(msg)}")
+        wake()
+        var opened = false
+        for (p in listOf("org.telegram.messenger", "org.telegram.messenger.web")) {
+            try {
+                ctx.startActivity(Intent(Intent.ACTION_VIEW, uri).setPackage(p).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                opened = true; break
+            } catch (e: Exception) { }
+        }
+        if (!opened) return Res("Телеграм не найден", false)
+        val svc = ClickService.instance ?: return Res("Включите спец. возможности", false)
+        svc.clickRetry(listOf("отправить", "send"), tries = 12, delay = 2500)
+        return Res("Пишу: ${c.first}")
+    }
+
+    // ---------- медиа ----------
     private fun send(code: Int) {
         audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
         audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
     }
 
-    private fun key(code: Int, reply: String): String { send(code); return reply }
+    private fun key(code: Int, reply: String): Res { send(code); return Res(reply) }
 
-    private fun volume(dir: Int, reply: String): String {
+    private fun volume(dir: Int, reply: String): Res {
         repeat(2) { audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, dir, AudioManager.FLAG_SHOW_UI) }
-        return reply
+        return Res(reply)
     }
 
-    private fun playMusic(): String {
-        if (audio.isMusicActive) return "Музыка уже играет"
+    private fun playMusic(): Res {
+        if (audio.isMusicActive) return Res("Музыка уже играет")
         send(KeyEvent.KEYCODE_MEDIA_PLAY)
         handler.postDelayed({
-            if (!audio.isMusicActive) {          // приложение не запущено — открываем
+            if (!audio.isMusicActive) {
+                wake()
                 launch(musicPackage)
-                handler.postDelayed({ send(KeyEvent.KEYCODE_MEDIA_PLAY) }, 3000)
+                ClickService.instance?.autoPlay()
             }
-        }, 2500)
-        return "Включаю музыку"
+        }, 1500)
+        return if (ClickService.instance == null) Res("Включите спец. возможности", false) else Res("Включаю музыку")
+    }
+
+    // ---------- приложения ----------
+    @Suppress("DEPRECATION")
+    private fun wake() {
+        val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+        pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "petya:wake")
+            .acquire(20_000)
     }
 
     private fun launch(pkg: String): Boolean {
@@ -124,19 +169,30 @@ class CommandHandler(private val ctx: Context) {
         ctx.startActivity(i); return true
     }
 
-    private fun openApp(query: String): String {
-        if (query.isBlank()) return "Что включить?"
+    private fun openApp(query: String): Res {
+        if (query.isBlank()) return Res("Что включить?", false)
         val words = aliases.entries.firstOrNull { query.contains(it.key.dropLast(2)) }?.value
             ?: listOf(if (query.length > 5) query.dropLast(2) else query)
         val pm = ctx.packageManager
-        val apps = pm.queryIntentActivities(
-            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
-        )
+        val apps = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
         val hit = apps.firstOrNull { ri ->
             val label = ri.loadLabel(pm).toString().lowercase().replace('ё', 'е')
             words.any { label.contains(it) }
-        } ?: return "Не нашёл приложение $query"
-        launch(hit.activityInfo.packageName)
-        return "Открываю ${hit.loadLabel(pm)}"
+        } ?: return Res("Не нашёл приложение $query", false)
+
+        val pkg = hit.activityInfo.packageName
+        if (pkg == musicPackage) return playMusic()
+        wake()
+        launch(pkg)
+        if (query.contains("радар")) {
+            ClickService.instance?.clickRetry(startLabels, tries = 10, stop = stopLabels, delay = 2000)
+        }
+        return Res("Открываю ${hit.loadLabel(pm)}")
+    }
+
+    private fun screen(): Res {
+        val svc = ClickService.instance ?: return Res("Включите спец. возможности", false)
+        AssistantState.screen.value = svc.dump()
+        return Res("Список сохранён")
     }
 }

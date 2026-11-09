@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -29,6 +31,7 @@ class AssistantService : Service(), TextToSpeech.OnInitListener {
     private var awaitingUntil = 0L
     private lateinit var commands: CommandHandler
 
+    private val idle = "Слушаю: скажите «Петя…»"
     private val wake = Regex("\\bпет[яьюи]\\b")
     private val listenRunnable = Runnable { listen() }
 
@@ -40,15 +43,15 @@ class AssistantService : Service(), TextToSpeech.OnInitListener {
         tts = TextToSpeech(this, this)
         startAsForeground()
         AssistantState.running.value = true
-        setStatus("Слушаю: скажите «Петя…»")
+        setStatus(idle)
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             setStatus("Нет службы распознавания речи (Google)"); return
         }
         recognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
             setRecognitionListener(object : RecognitionListener {
                 override fun onResults(r: Bundle?) {
-                    r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.let { process(it) }
-                    restart(250)
+                    val d = r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.let { process(it) } ?: 250L
+                    restart(d)
                 }
                 override fun onError(error: Int) =
                     restart(if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 1000 else 250)
@@ -79,7 +82,7 @@ class AssistantService : Service(), TextToSpeech.OnInitListener {
         tts?.language = Locale("ru", "RU")
         tts?.setAudioAttributes(
             AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE) // приглушает музыку
+                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
         )
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
@@ -109,7 +112,8 @@ class AssistantService : Service(), TextToSpeech.OnInitListener {
     private fun norm(s: String) = s.lowercase().replace('ё', 'е')
         .replace(Regex("[^а-яa-z0-9 ]"), " ").replace(Regex("\\s+"), " ").trim()
 
-    private fun process(results: List<String>) {
+    /** Возвращает паузу (мс) перед следующим прослушиванием. */
+    private fun process(results: List<String>): Long {
         val texts = results.map(::norm)
         val now = SystemClock.elapsedRealtime()
         AssistantState.heard.value = texts.firstOrNull().orEmpty()
@@ -120,20 +124,34 @@ class AssistantService : Service(), TextToSpeech.OnInitListener {
             if (m != null) { cmd = t.substring(m.range.last + 1).trim(); break }
         }
         if (cmd == null && now < awaitingUntil) cmd = texts.firstOrNull()
-        if (cmd == null) return
+        if (cmd == null) return 250
 
-        if (cmd.isBlank()) {               // сказали только «Петя»
+        if (cmd.isBlank()) {               // сказали только «Петя» -> сигнал, ждём команду
             awaitingUntil = now + 6000
             AssistantState.active.value = true
             setStatus("Слушаю команду…")
-            speak("Слушаю"); return
+            beep(ToneGenerator.TONE_PROP_BEEP)
+            handler.postDelayed({
+                if (SystemClock.elapsedRealtime() >= awaitingUntil) { AssistantState.active.value = false; setStatus(idle) }
+            }, 6100)
+            return 700
         }
         awaitingUntil = 0
-        val reply = commands.handle(cmd)
-        AssistantState.action.value = reply
+        val res = commands.handle(cmd)
+        AssistantState.action.value = res.say
         AssistantState.active.value = false
-        setStatus("Слушаю: скажите «Петя…»")
-        speak(reply)
+        setStatus(idle)
+        beep(if (res.ok) ToneGenerator.TONE_PROP_ACK else ToneGenerator.TONE_PROP_NACK)
+        if (getSharedPreferences("p", 0).getBoolean("voice", false)) speak(res.say)
+        return 700
+    }
+
+    private fun beep(type: Int) {
+        try {
+            val tg = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+            tg.startTone(type, 200)
+            handler.postDelayed({ tg.release() }, 600)
+        } catch (e: Exception) { }
     }
 
     private fun speak(text: String) {
