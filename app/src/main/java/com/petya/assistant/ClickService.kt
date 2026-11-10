@@ -20,6 +20,7 @@ class ClickService : AccessibilityService() {
         @Volatile var instance: ClickService? = null
         const val MUSIC = "ru.yandex.music"
         val PLAY = listOf("воспроизвести", "играть", "play", "слушать", "моя волна")
+        val PLAY_IDS = listOf("play_pause", "playpause", "btn_play", "button_play", "play_button", "fab_play")
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -35,8 +36,7 @@ class ClickService : AccessibilityService() {
     override fun onAccessibilityEvent(e: AccessibilityEvent) {
         if (e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = e.packageName?.toString() ?: return
-        // Яндекс.Музыку открыли (мной или руками) — сама начинает играть
-        if (pkg == MUSIC && lastPkg != MUSIC) {
+        if (pkg == MUSIC && lastPkg != MUSIC) {          // Яндекс.Музыку открыли — сама играет
             val now = SystemClock.elapsedRealtime()
             if (now - lastAuto > 30_000) { lastAuto = now; autoPlay() }
         }
@@ -50,6 +50,11 @@ class ClickService : AccessibilityService() {
             t.isNotEmpty() && labels.any { l -> t == l || (l.length >= 6 && t.contains(l)) }
         }
 
+    private fun idMatches(n: AccessibilityNodeInfo, ids: List<String>): Boolean {
+        val id = n.viewIdResourceName?.lowercase() ?: return false
+        return ids.any { id.contains(it) }
+    }
+
     private fun walk(n: AccessibilityNodeInfo?, f: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
         if (n == null) return null
         if (f(n)) return n
@@ -59,8 +64,8 @@ class ClickService : AccessibilityService() {
 
     fun hasAny(labels: List<String>) = walk(rootInActiveWindow) { matches(it, labels) } != null
 
-    fun clickAny(labels: List<String>): Boolean {
-        val node = walk(rootInActiveWindow) { matches(it, labels) } ?: return false
+    private fun clickWhere(pred: (AccessibilityNodeInfo) -> Boolean): Boolean {
+        val node = walk(rootInActiveWindow, pred) ?: return false
         var c: AccessibilityNodeInfo? = node
         while (c != null && !c.isClickable) c = c.parent
         if (c != null && c.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
@@ -70,6 +75,9 @@ class ClickService : AccessibilityService() {
             GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p, 0, 60)).build(), null, null
         )
     }
+
+    fun clickAny(labels: List<String>) = clickWhere { matches(it, labels) }
+    fun clickIds(ids: List<String>) = clickWhere { idMatches(it, ids) }
 
     /** Пробует нажать кнопку несколько раз (приложение ещё грузится). */
     fun clickRetry(labels: List<String>, tries: Int = 10, stop: List<String> = emptyList(), delay: Long = 1500) {
@@ -96,19 +104,21 @@ class ClickService : AccessibilityService() {
         fun step() {
             if (audio.isMusicActive || n++ > 10) { busy = false; return }
             if (n == 1) mediaPlay()
-            else if (clickAny(PLAY)) { handler.postDelayed({ busy = false }, 2000); return }
+            else if (clickAny(PLAY) || clickIds(PLAY_IDS)) { handler.postDelayed({ busy = false }, 2000); return }
             handler.postDelayed({ step() }, 1000)
         }
         handler.postDelayed({ step() }, 1500)
     }
 
-    /** Список подписей на экране — чтобы подобрать названия кнопок. */
+    /** Список подписей и id на экране — чтобы подобрать названия кнопок. */
     fun dump(): String {
         val out = LinkedHashSet<String>()
         fun go(n: AccessibilityNodeInfo?) {
-            if (n == null || out.size > 40) return
-            val t = (n.text ?: n.contentDescription)?.toString()?.trim()
-            if (!t.isNullOrEmpty()) out.add((if (n.isClickable) "[кнопка] " else "") + t.take(40))
+            if (n == null || out.size > 50) return
+            val t = (n.text ?: n.contentDescription)?.toString()?.trim().orEmpty()
+            val id = n.viewIdResourceName?.substringAfter(":id/").orEmpty()
+            if (t.isNotEmpty() || (n.isClickable && id.isNotEmpty()))
+                out.add((if (n.isClickable) "[кнопка] " else "") + t.take(40) + (if (id.isNotEmpty()) "  {$id}" else ""))
             for (i in 0 until n.childCount) go(n.getChild(i))
         }
         go(rootInActiveWindow)

@@ -59,8 +59,6 @@ fun App() {
     val screen by AssistantState.screen.collectAsState()
     var overlayOk by remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     var accOk by remember { mutableStateOf(ClickService.instance != null) }
-    val prefs = remember { ctx.getSharedPreferences("p", 0) }
-    var voice by remember { mutableStateOf(prefs.getBoolean("voice", false)) }
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
         val o = LifecycleEventObserver { _, e ->
@@ -137,11 +135,6 @@ fun App() {
             onClick = { ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
             modifier = Modifier.fillMaxWidth()
         ) { Text(if (accOk) "Спец. возможности: включены ✓" else "Включить спец. возможности (нажатие кнопок)") }
-
-        Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Голосовые ответы (кроме сигналов)", color = Color.White, modifier = Modifier.weight(1f))
-            Switch(checked = voice, onCheckedChange = { voice = it; prefs.edit().putBoolean("voice", it).apply() })
-        }
 
         Spacer(Modifier.height(16.dp))
         Column(

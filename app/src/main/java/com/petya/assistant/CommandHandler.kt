@@ -27,9 +27,9 @@ class CommandHandler(private val ctx: Context) {
 
     // «Петя, включи антирадар» -> ищем в названиях приложений любое из слов
     private val aliases = mapOf(
-        "антирадар" to listOf("антирадар", "радар", "radar"),
+        "радар" to listOf("антирадар", "радар", "radar"),
         "навигатор" to listOf("навигатор", "navigator"),
-        "карты" to listOf("карты", "maps"),
+        "карт" to listOf("карты", "maps"),
         "такси" to listOf("такси", "taxi"),
     )
     // Для этих приложений после запуска нажимается «Старт», если ещё не запущено
@@ -39,7 +39,7 @@ class CommandHandler(private val ctx: Context) {
     fun handle(cmd: String): Res {
         fun has(vararg w: String) = w.any { cmd.contains(it) }
         return when {
-            cmd.startsWith("напиши") || cmd.startsWith("отправь") -> message(cmd)
+            cmd.startsWith("напиш") || cmd.startsWith("отправ") -> message(cmd)
             has("на экране", "покажи кнопки") -> screen()
             has("ответь", "ответить", "возьми трубку", "подними трубку", "прими") -> answerCall()
             has("сбрось", "положи трубку", "отбой", "заверши звонок") -> endCall()
@@ -104,7 +104,7 @@ class CommandHandler(private val ctx: Context) {
 
     // ---------- Телеграм ----------
     private fun message(cmd: String): Res {
-        val rest = cmd.replace(Regex("^(напиши|отправь)\\s*(сообщение)?\\s*"), "")
+        val rest = cmd.replace(Regex("^(напиш\\S*|отправ\\S*)\\s*(сообщение)?\\s*"), "")
         val idx = rest.indexOf(" что ")
         val name = if (idx > 0) rest.substring(0, idx) else rest.substringBefore(" ")
         val msg = (if (idx > 0) rest.substring(idx + 5) else rest.substringAfter(" ", ""))
@@ -142,16 +142,31 @@ class CommandHandler(private val ctx: Context) {
         return Res(reply)
     }
 
+    /** Нажатие медиа-кнопки прямо в приложение (так «просыпается» остановленный плеер). */
+    private fun sendTo(pkg: String, code: Int) {
+        for (a in intArrayOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP)) {
+            try {
+                ctx.sendBroadcast(
+                    Intent(Intent.ACTION_MEDIA_BUTTON).setPackage(pkg)
+                        .putExtra(Intent.EXTRA_KEY_EVENT, KeyEvent(a, code))
+                )
+            } catch (e: Exception) { }
+        }
+    }
+
     private fun playMusic(): Res {
         if (audio.isMusicActive) return Res("Музыка уже играет")
-        send(KeyEvent.KEYCODE_MEDIA_PLAY)
+        send(KeyEvent.KEYCODE_MEDIA_PLAY)                                   // 1) общая кнопка
         handler.postDelayed({
             if (!audio.isMusicActive) {
-                wake()
-                launch(musicPackage)
-                ClickService.instance?.autoPlay()
+                sendTo(musicPackage, KeyEvent.KEYCODE_MEDIA_PLAY)           // 2) кнопка прямо в Яндекс.Музыку
+                handler.postDelayed({
+                    if (!audio.isMusicActive) {                             // 3) открыть и нажать Play
+                        wake(); launch(musicPackage); ClickService.instance?.autoPlay()
+                    }
+                }, 1800)
             }
-        }, 1500)
+        }, 1200)
         return if (ClickService.instance == null) Res("Включите спец. возможности", false) else Res("Включаю музыку")
     }
 
@@ -171,7 +186,8 @@ class CommandHandler(private val ctx: Context) {
 
     private fun openApp(query: String): Res {
         if (query.isBlank()) return Res("Что включить?", false)
-        val words = aliases.entries.firstOrNull { query.contains(it.key.dropLast(2)) }?.value
+        val q = query.replace(" ", "")
+        val words = aliases.entries.firstOrNull { q.contains(it.key) }?.value
             ?: listOf(if (query.length > 5) query.dropLast(2) else query)
         val pm = ctx.packageManager
         val apps = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
@@ -184,7 +200,7 @@ class CommandHandler(private val ctx: Context) {
         if (pkg == musicPackage) return playMusic()
         wake()
         launch(pkg)
-        if (query.contains("радар")) {
+        if (q.contains("радар")) {
             ClickService.instance?.clickRetry(startLabels, tries = 10, stop = stopLabels, delay = 2000)
         }
         return Res("Открываю ${hit.loadLabel(pm)}")
