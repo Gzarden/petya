@@ -15,7 +15,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-data class Res(val say: String, val ok: Boolean = true)
+data class Res(val say: String, val ok: Boolean = true, val speak: Boolean = true, val force: Boolean = false)
 
 /** Разбирает текст команды и выполняет действие. */
 class CommandHandler(private val ctx: Context) {
@@ -167,7 +167,7 @@ class CommandHandler(private val ctx: Context) {
                 }, 1800)
             }
         }, 1200)
-        return if (ClickService.instance == null) Res("Включите спец. возможности", false) else Res("Включаю музыку")
+        return if (ClickService.instance == null) Res("Включите спец. возможности", false) else Res("Включаю музыку", true, false)
     }
 
     // ---------- приложения ----------

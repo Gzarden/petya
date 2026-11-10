@@ -26,6 +26,7 @@
 
     <application
         android:label="Петя"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:icon="@android:drawable/ic_btn_speak_now"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         <activity android:name=".MainActivity" android:exported="true">

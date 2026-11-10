@@ -6,6 +6,10 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.speech.tts.TextToSpeech
+import android.widget.Toast
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import java.util.Locale
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -59,6 +63,18 @@ fun App() {
     val screen by AssistantState.screen.collectAsState()
     var overlayOk by remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     var accOk by remember { mutableStateOf(ClickService.instance != null) }
+    val prefs = remember { ctx.getSharedPreferences("p", 0) }
+    var voice by remember { mutableStateOf(prefs.getBoolean("voice", true)) }
+    var voiceIdx by remember { mutableStateOf(-1) }
+    var key by remember { mutableStateOf(prefs.getString("gigaKey", "") ?: "") }
+    val ttsHolder = remember { arrayOfNulls<TextToSpeech>(1) }
+    remember {
+        ttsHolder[0] = TextToSpeech(ctx) { st ->
+            if (st == TextToSpeech.SUCCESS) { ttsHolder[0]?.language = Locale("ru", "RU") }
+        }
+        0
+    }
+    DisposableEffect(Unit) { onDispose { ttsHolder[0]?.shutdown() } }
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
         val o = LifecycleEventObserver { _, e ->
@@ -136,6 +152,42 @@ fun App() {
             modifier = Modifier.fillMaxWidth()
         ) { Text(if (accOk) "Спец. возможности: включены ✓" else "Включить спец. возможности (нажатие кнопок)") }
 
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Голосовые ответы", color = Color.White, modifier = Modifier.weight(1f))
+            Switch(checked = voice, onCheckedChange = { voice = it; prefs.edit().putBoolean("voice", it).apply() })
+        }
+        OutlinedButton(
+            onClick = {
+                val t = ttsHolder[0]
+                val list = t?.voices?.filter { it.locale.language == "ru" }?.sortedBy { it.name }.orEmpty()
+                if (t == null || list.isEmpty()) {
+                    Toast.makeText(ctx, "Русские голоса не найдены. Установите «Синтез речи Google».", Toast.LENGTH_LONG).show()
+                } else {
+                    voiceIdx = (voiceIdx + 1) % list.size
+                    val v = list[voiceIdx]
+                    t.voice = v; t.setPitch(0.9f)
+                    prefs.edit().putString("voiceName", v.name).apply()
+                    t.speak("Привет, я Петя. Вот так я звучу.", TextToSpeech.QUEUE_FLUSH, null, "t")
+                    Toast.makeText(ctx, "Голос ${voiceIdx + 1} из ${list.size}", Toast.LENGTH_SHORT).show()
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Сменить голос (нажимайте, пока не понравится)") }
+
+        OutlinedTextField(
+            value = key,
+            onValueChange = { key = it; prefs.edit().putString("gigaKey", it.trim()).apply() },
+            label = { Text("Ключ GigaChat (нейросеть)") },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+        )
+        Text(
+            if (key.isBlank()) "Без ключа понимаются только заранее заданные команды"
+            else "Нейросеть подключена: непонятные фразы разбирает GigaChat",
+            color = Color(0xFF94A3B8), fontSize = 12.sp
+        )
+
         Spacer(Modifier.height(16.dp))
         Column(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Color(0x22FFFFFF)).padding(16.dp),
@@ -145,7 +197,7 @@ fun App() {
             listOf(
                 "Петя, ответь · сбрось", "Петя, позвони Любимой", "Петя, следующая песня · предыдущая",
                 "Петя, тише · громче · пауза", "Петя, включи музыку", "Петя, включи антирадар / навигатор",
-                "Петя, напиши Любимой, что бегу домой (Телеграм)", "Петя, который час", "Петя, что на экране (список кнопок)"
+                "Петя, напиши Любимой, что бегу домой (Телеграм)", "Петя, любой вопрос или фраза своими словами (нужен ключ GigaChat)", "Петя, который час", "Петя, что на экране (список кнопок)"
             ).forEach { Text(it, color = Color(0xFFCBD5E1), fontSize = 13.sp) }
         }
         if (screen.isNotBlank()) {

@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
@@ -17,12 +18,15 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import org.json.JSONArray
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
 import org.vosk.android.StorageService
 import java.io.IOException
+import java.util.Locale
 import java.util.concurrent.Executors
 
 /**
@@ -47,6 +51,8 @@ class AssistantService : Service() {
     private var cmdRec: Recognizer? = null
     private var freeRec: Recognizer? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
     @Volatile private var alive = false
     @Volatile private var destroyed = false
     @Volatile private var muteUntil = 0L
@@ -63,6 +69,7 @@ class AssistantService : Service() {
         super.onCreate()
         commands = CommandHandler(this)
         startAsForeground()
+        tts = TextToSpeech(this) { st -> handler.post { initTts(st) } }
         AssistantState.running.value = true
         setStatus("Загружаю модель речи… (первый раз до минуты)")
         val pm = getSystemService(POWER_SERVICE) as PowerManager
@@ -76,6 +83,7 @@ class AssistantService : Service() {
 
     override fun onDestroy() {
         destroyed = true
+        tts?.shutdown()
         alive = false                      // аудио-поток сам закроет распознаватели
         handler.removeCallbacksAndMessages(null)
         wakeLock?.let { if (it.isHeld) it.release() }
@@ -194,10 +202,62 @@ class AssistantService : Service() {
     private fun execute(cmd: String) {
         awaitingUntil = 0
         val res = commands.handle(cmd)
+        if (!res.ok && res.say == "Не понял" && Brain.configured(this)) { askBrain(cmd); return }
+        finish(cmd, res)
+    }
+
+    /** Фраза не подошла ни одной команде — отдаём нейросети. */
+    private fun askBrain(cmd: String) {
+        AssistantState.action.value = "«$cmd» → думаю…"
+        setStatus("Думаю…")
+        Thread {
+            val r = Brain.ask(this, cmd)
+            handler.post {
+                setStatus(idle)
+                if (r == null && Brain.lastError.isNotEmpty()) AssistantState.screen.value = "Нейросеть: ${Brain.lastError}"
+                val res = when {
+                    r == null -> Res("Не понял", false)
+                    r.reply != null -> Res(r.reply, true, true, true)
+                    r.command != null -> commands.handle(r.command)
+                    else -> Res("Не понял", false)
+                }
+                finish(cmd, res)
+            }
+        }.start()
+    }
+
+    private fun finish(cmd: String, res: Res) {
         AssistantState.action.value = "«$cmd» → ${res.say}"
         AssistantState.active.value = false
         setStatus(idle)
-        beep(if (res.ok) ToneGenerator.TONE_PROP_ACK else ToneGenerator.TONE_PROP_NACK)
+        val voice = getSharedPreferences("p", 0).getBoolean("voice", true)
+        if ((voice || res.force) && ttsReady && res.speak && res.say.isNotBlank()) speak(res.say)
+        else beep(if (res.ok) ToneGenerator.TONE_PROP_ACK else ToneGenerator.TONE_PROP_NACK)
+    }
+
+    private fun initTts(status: Int) {
+        val t = tts ?: return
+        if (status != TextToSpeech.SUCCESS) return
+        t.language = Locale("ru", "RU")
+        val name = getSharedPreferences("p", 0).getString("voiceName", null)
+        if (name != null) t.voices?.firstOrNull { it.name == name }?.let { t.voice = it }
+        t.setPitch(0.9f)
+        t.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)   // музыка приглушается
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
+        )
+        t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(id: String?) {}
+            override fun onDone(id: String?) { muteUntil = SystemClock.elapsedRealtime() + 400 }
+            @Deprecated("Deprecated in Java") override fun onError(id: String?) { muteUntil = SystemClock.elapsedRealtime() + 400 }
+        })
+        ttsReady = true
+    }
+
+    private fun speak(text: String) {
+        muteUntil = SystemClock.elapsedRealtime() + 400 + text.length * 90L   // не слушаем самих себя
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "u")
     }
 
     private fun beep(type: Int) {
