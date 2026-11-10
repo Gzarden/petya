@@ -21,6 +21,24 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
+      - name: Cache Vosk model
+        id: vosk
+        uses: actions/cache@v4
+        with:
+          path: model-cache
+          key: vosk-model-small-ru-0.22
+      - name: Download Vosk model
+        if: steps.vosk.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p model-cache
+          curl -L --fail -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip
+          unzip -q model.zip -d model-cache
+      - name: Put model into assets
+        run: |
+          mkdir -p app/src/main/assets
+          rm -rf app/src/main/assets/model
+          cp -r model-cache/vosk-model-small-ru-0.22 app/src/main/assets/model
+          cat /proc/sys/kernel/random/uuid > app/src/main/assets/model/uuid
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
       - name: Rename APK
